@@ -1,0 +1,64 @@
+name: ASEA Code Verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  verify-pull-request:
+    name: Run ASEA Code Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Trigger ASEA Verification API
+        env:
+          ASEA_API_URL: ${{ secrets.ASEA_API_URL || 'http://localhost:8000' }}
+          ASEA_USERNAME: ${{ secrets.ASEA_USERNAME || 'ci_bot' }}
+          ASEA_PASSWORD: ${{ secrets.ASEA_PASSWORD }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -e
+          # Mask credentials in logs
+          echo "::add-mask::$ASEA_PASSWORD"
+
+          echo "Initiating ASEA Verification for PR #$PR_NUMBER ($PR_URL)..."
+
+          # 1. Obtain JWT Access Token
+          TOKEN_RESPONSE=$(curl -s -X POST "$ASEA_API_URL/api/auth/token/" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\": \"$ASEA_USERNAME\", \"password\": \"$ASEA_PASSWORD\"}")
+
+          ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('access', ''))")
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::error::Failed to authenticate with ASEA API. Check ASEA_USERNAME and ASEA_PASSWORD secrets."
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          # 2. Trigger Full CI Verification Run
+          VERIFY_RESPONSE=$(curl -s -X POST "$ASEA_API_URL/api/verify/ci-trigger" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"repoUrl\": \"$PR_URL\", \"prNumber\": $PR_NUMBER}")
+
+          echo "ASEA Verification Result: $VERIFY_RESPONSE"
+
+          # 3. Check for API failure
+          RUN_STATUS=$(echo "$VERIFY_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', 'FAILED'))")
+
+          if [ "$RUN_STATUS" = "FAILED" ] || [ "$RUN_STATUS" = "SCAN_FAILED" ] || [ "$RUN_STATUS" = "ARCHITECTURE_FAILED" ] || [ "$RUN_STATUS" = "SCORE_FAILED" ]; then
+            echo "::error::ASEA Code Verification failed with status: $RUN_STATUS"
+            exit 1
+          fi
+
+          echo "ASEA Verification completed successfully with status: $RUN_STATUS"
